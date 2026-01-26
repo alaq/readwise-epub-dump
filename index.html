@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Readwise Kindle Dump</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <h1>Readwise Kindle Dump</h1>
+        <p>Build a single EPUB from your Reader articles and optionally tag or archive them.</p>
+      </header>
+
+      <section class="card">
+        <form id="controls" autocomplete="off">
+          <label>
+            Readwise access token
+            <input id="token" type="password" placeholder="Token XXX" required />
+          </label>
+
+          <label>
+            Location
+            <select id="location">
+              <option value="new">new</option>
+              <option value="later" selected>later</option>
+              <option value="shortlist">shortlist</option>
+              <option value="archive">archive</option>
+              <option value="feed">feed</option>
+            </select>
+          </label>
+
+          <label>
+            Tag prefix
+            <input id="tagPrefix" type="text" placeholder="kindle" />
+          </label>
+
+          <div class="toggles">
+            <label class="inline">
+              <input id="applyTags" type="checkbox" checked />
+              Apply tag after export
+            </label>
+            <label class="inline">
+              <input id="archive" type="checkbox" />
+              Archive after export
+            </label>
+          </div>
+
+          <div class="tag-preview">
+            Tag preview: <span id="tagPreview">(set a tag prefix)</span>
+          </div>
+
+          <button id="run" type="submit">Fetch and build EPUB</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>Status</h2>
+        <div id="status" class="status">Idle</div>
+        <div class="actions">
+          <a id="download" class="button" href="#" download hidden>Download EPUB</a>
+        </div>
+      </section>
+
+      <section class="card log-card">
+        <h2>Logs</h2>
+        <pre id="log" class="log"></pre>
+      </section>
+
+      <footer class="footer">
+        <p>Token stays in your browser. This app talks directly to Readwise APIs.</p>
+      </footer>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
