@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Readwise Kindle Dump</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%9A%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   </head>
@@ -20,6 +21,13 @@
             Readwise access token
             <input id="token" type="password" placeholder="Token XXX" required />
           </label>
+          <p class="helper">
+            Get your token at
+            <a href="https://readwise.io/access_token" target="_blank" rel="noreferrer">
+              readwise.io/access_token
+            </a>.
+            Click “Get Access Token” and paste it here.
+          </p>
 
           <label>
             Location
@@ -70,7 +78,14 @@
       </section>
 
       <footer class="footer">
-        <p>Token stays in your browser. This app talks directly to Readwise APIs.</p>
+        <p>
+          Everything happens in your browser. Your token never leaves your computer.
+        </p>
+        <p>
+          <a href="https://github.com/alaq/readwise-kindle-dump" target="_blank" rel="noreferrer">
+            github.com/alaq/readwise-kindle-dump
+          </a>
+        </p>
       </footer>
     </main>
 

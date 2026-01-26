@@ -33,7 +33,7 @@ function sleep(ms) {
 }
 
 function escapeXml(value) {
-  return value
+  return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -62,19 +62,68 @@ function updateTagPreview() {
     elements.tagPreview.textContent = "(set a tag prefix)";
     return;
   }
-  elements.tagPreview.textContent = `${prefix}-${todayUtc()}-1`;
+  elements.tagPreview.textContent = `${prefix}-${todayUtc()}`;
 }
 
-function normalizeContent(html) {
+const VOID_ELEMENTS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+const DROP_ELEMENTS = new Set(["script", "noscript"]);
+
+function parseHtmlContent(html) {
   if (!html) {
-    return "";
+    return null;
   }
   const lower = html.toLowerCase();
+  const parser = new DOMParser();
   if (lower.includes("<html") || lower.includes("<body")) {
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    return doc.body ? doc.body.innerHTML : html;
+    return parser.parseFromString(html, "text/html");
   }
-  return html;
+  return parser.parseFromString(`<body>${html}</body>`, "text/html");
+}
+
+function serializeNode(node) {
+  switch (node.nodeType) {
+    case Node.TEXT_NODE:
+      return escapeXml(node.nodeValue || "");
+    case Node.ELEMENT_NODE: {
+      const tag = node.tagName.toLowerCase();
+      if (DROP_ELEMENTS.has(tag)) {
+        return "";
+      }
+      let attrs = "";
+      for (const attr of node.attributes) {
+        attrs += ` ${attr.name}=\"${escapeXml(attr.value)}\"`;
+      }
+      if (VOID_ELEMENTS.has(tag)) {
+        return `<${tag}${attrs} />`;
+      }
+      const children = Array.from(node.childNodes)
+        .map(serializeNode)
+        .join("");
+      return `<${tag}${attrs}>${children}</${tag}>`;
+    }
+    default:
+      return "";
+  }
+}
+
+function serializeChildren(node) {
+  return Array.from(node.childNodes).map(serializeNode).join("");
 }
 
 function resolveUrl(source, baseUrl) {
@@ -95,29 +144,92 @@ function resolveUrl(source, baseUrl) {
   }
 }
 
-async function fetchImageAsDataUrl(url) {
+function inferImageExtension(mediaType, sourceUrl) {
+  if (mediaType) {
+    const normalized = mediaType.split(";")[0].trim();
+    const known = {
+      "image/jpeg": "jpg",
+      "image/jpg": "jpg",
+      "image/png": "png",
+      "image/gif": "gif",
+      "image/webp": "webp",
+      "image/svg+xml": "svg",
+      "image/avif": "avif",
+    };
+    if (known[normalized]) {
+      return known[normalized];
+    }
+  }
+
+  if (sourceUrl) {
+    const match = sourceUrl.split("?")[0].match(/\\.([a-z0-9]+)$/i);
+    if (match) {
+      return match[1].toLowerCase();
+    }
+  }
+
+  return "bin";
+}
+
+function parseDataUrl(dataUrl) {
+  const match = dataUrl.match(/^data:([^;,]*)(;base64)?,(.*)$/);
+  if (!match) {
+    return null;
+  }
+  const mediaType = match[1] || "application/octet-stream";
+  const isBase64 = Boolean(match[2]);
+  const dataPart = match[3] || "";
   try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      return null;
+    if (isBase64) {
+      const binary = atob(dataPart);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return { mediaType, bytes };
     }
-    const blob = await response.blob();
-    if (!blob.type || !blob.type.startsWith("image/")) {
-      return null;
-    }
-    return await new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result);
-      reader.onerror = () => resolve(null);
-      reader.readAsDataURL(blob);
-    });
+    const decoded = decodeURIComponent(dataPart);
+    const bytes = new TextEncoder().encode(decoded);
+    return { mediaType, bytes };
   } catch (error) {
     return null;
   }
 }
 
-async function inlineImagesInContent(content, baseUrl) {
-  const doc = new DOMParser().parseFromString(`<body>${content}</body>`, "text/html");
+async function fetchImageBytes(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+    const contentType = response.headers.get("Content-Type") || "";
+    const buffer = await response.arrayBuffer();
+    return { contentType, bytes: new Uint8Array(buffer) };
+  } catch (error) {
+    return null;
+  }
+}
+
+function registerImageAsset(registry, key, mediaType, bytes, sourceUrl) {
+  if (registry.map.has(key)) {
+    return registry.map.get(key);
+  }
+
+  registry.counter += 1;
+  const extension = inferImageExtension(mediaType, sourceUrl);
+  const filename = `image-${registry.counter}.${extension}`;
+  const asset = {
+    id: `image-${registry.counter}`,
+    href: `images/${filename}`,
+    filename,
+    mediaType: mediaType.split(";")[0].trim() || "application/octet-stream",
+    bytes,
+  };
+  registry.map.set(key, asset);
+  return asset;
+}
+
+async function embedImagesInDocument(doc, baseUrl, registry) {
   const images = Array.from(doc.querySelectorAll("img"));
   let inlined = 0;
   let failed = 0;
@@ -132,29 +244,56 @@ async function inlineImagesInContent(content, baseUrl) {
       skipped += 1;
       continue;
     }
+
+    let asset = null;
     if (src.startsWith("data:")) {
-      skipped += 1;
-      continue;
+      const parsed = parseDataUrl(src);
+      if (parsed) {
+        asset = registerImageAsset(
+          registry,
+          src,
+          parsed.mediaType,
+          parsed.bytes,
+          null
+        );
+      }
+    } else {
+      const resolved = resolveUrl(src, baseUrl);
+      if (!resolved) {
+        failed += 1;
+        continue;
+      }
+      asset = registry.map.get(resolved);
+      if (!asset) {
+        const fetched = await fetchImageBytes(resolved);
+        if (!fetched) {
+          img.setAttribute("src", resolved);
+          failed += 1;
+          continue;
+        }
+        asset = registerImageAsset(
+          registry,
+          resolved,
+          fetched.contentType,
+          fetched.bytes,
+          resolved
+        );
+      }
     }
-    const resolved = resolveUrl(src, baseUrl);
-    if (!resolved) {
+
+    if (!asset) {
       failed += 1;
       continue;
     }
-    const dataUrl = await fetchImageAsDataUrl(resolved);
-    if (!dataUrl) {
-      failed += 1;
-      continue;
-    }
-    img.setAttribute("src", dataUrl);
+
+    img.setAttribute("src", `../${asset.href}`);
     img.removeAttribute("srcset");
+    img.removeAttribute("data-src");
+    img.removeAttribute("data-original");
     inlined += 1;
   }
 
-  return {
-    html: doc.body.innerHTML,
-    stats: { total: images.length, inlined, failed, skipped },
-  };
+  return { total: images.length, inlined, failed, skipped };
 }
 
 async function fetchAllDocuments(token, location) {
@@ -264,11 +403,18 @@ ${navPoints}
 </ncx>`;
 }
 
-function buildContentOpf(entries, title, author, uid) {
+function buildContentOpf(entries, imageItems, title, author, uid) {
   const manifestItems = entries
     .map(
       (entry, index) =>
         `    <item id="item-${index + 1}" href="${entry.href}" media-type="application/xhtml+xml" />`
+    )
+    .join("\n");
+
+  const imageManifestItems = imageItems
+    .map(
+      (item) =>
+        `    <item id="${item.id}" href="${item.href}" media-type="${item.mediaType}" />`
     )
     .join("\n");
 
@@ -292,6 +438,7 @@ function buildContentOpf(entries, title, author, uid) {
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml" />
 ${manifestItems}
+${imageManifestItems}
   </manifest>
   <spine toc="ncx">
 ${spineItems}
@@ -299,26 +446,29 @@ ${spineItems}
 </package>`;
 }
 
-async function buildChapterXhtml(item) {
+async function buildChapterXhtml(item, imageRegistry) {
   const title = item.title || "Untitled";
   const author = item.author || "";
   const site = item.site_name || "";
   const created = item.created_at ? item.created_at.slice(0, 10) : "";
   const source = item.source_url || item.url || "";
 
-  let content = normalizeContent(item.html_content || "");
+  let content = "";
+  let imageStats = null;
+  const doc = parseHtmlContent(item.html_content || "");
+  if (doc && doc.body) {
+    if (source) {
+      imageStats = await embedImagesInDocument(doc, source, imageRegistry);
+    }
+    content = serializeChildren(doc.body);
+  }
+
   if (!content) {
     content = `<p>Content unavailable from Readwise. <a href="${escapeXml(
       source
     )}">Open source</a>.</p>`;
   }
 
-  let imageStats = null;
-  if (content && source) {
-    const inlined = await inlineImagesInContent(content, source);
-    content = inlined.html;
-    imageStats = inlined.stats;
-  }
   if (imageStats && imageStats.total > 0) {
     logLine(
       `Images for ${title}: inlined ${imageStats.inlined}/${imageStats.total}, failed ${imageStats.failed}, skipped ${imageStats.skipped}.`
@@ -326,7 +476,6 @@ async function buildChapterXhtml(item) {
   }
 
   const byline = [author, site].filter(Boolean).join(" - ");
-  const baseTag = source ? `<base href="${escapeXml(source)}" />` : "";
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -334,7 +483,6 @@ async function buildChapterXhtml(item) {
   <head>
     <title>${escapeXml(title)}</title>
     <meta charset="utf-8" />
-    ${baseTag}
     <link rel="stylesheet" type="text/css" href="../styles.css" />
   </head>
   <body>
@@ -388,23 +536,38 @@ async function buildEpub(items, options) {
   const oebps = zip.folder("OEBPS");
   oebps.file("styles.css", buildStylesheet());
 
+  const imageRegistry = { map: new Map(), counter: 0 };
+
   const entries = items.map((item, index) => ({
     title: item.title || `Untitled ${index + 1}`,
     href: `text/item-${index + 1}.xhtml`,
   }));
 
+  const textDir = oebps.folder("text");
+  for (const [index, item] of items.entries()) {
+    const chapter = await buildChapterXhtml(item, imageRegistry);
+    textDir.file(`item-${index + 1}.xhtml`, chapter);
+  }
+
+  const imageItems = [];
+  if (imageRegistry.map.size > 0) {
+    const imagesDir = oebps.folder("images");
+    for (const asset of imageRegistry.map.values()) {
+      imagesDir.file(asset.filename, asset.bytes);
+      imageItems.push({
+        id: asset.id,
+        href: asset.href,
+        mediaType: asset.mediaType,
+      });
+    }
+  }
+
   oebps.file("nav.xhtml", buildNavXhtml(entries, options.title));
   oebps.file("toc.ncx", buildTocNcx(entries, options.title, options.uid));
   oebps.file(
     "content.opf",
-    buildContentOpf(entries, options.title, options.author, options.uid)
+    buildContentOpf(entries, imageItems, options.title, options.author, options.uid)
   );
-
-  const textDir = oebps.folder("text");
-  for (const [index, item] of items.entries()) {
-    const chapter = await buildChapterXhtml(item);
-    textDir.file(`item-${index + 1}.xhtml`, chapter);
-  }
 
   return zip.generateAsync({
     type: "blob",
@@ -468,7 +631,7 @@ function getTag(prefix) {
   if (!prefix) {
     return "";
   }
-  return `${prefix}-${todayUtc()}-1`;
+  return `${prefix}-${todayUtc()}`;
 }
 
 elements.tagPrefix.addEventListener("input", updateTagPreview);

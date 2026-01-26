@@ -95,6 +95,16 @@ select {
   color: var(--muted);
 }
 
+.helper {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.helper a {
+  color: var(--accent);
+}
+
 button,
 .button {
   border: none;
