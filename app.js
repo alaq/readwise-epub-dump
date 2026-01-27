@@ -14,6 +14,7 @@ const elements = {
 
 const READWISE_API = "https://readwise.io/api/v3";
 const RATE_LIMIT_MS = 3000;
+const TOKEN_STORAGE_KEY = "readwise-epub-dump.token";
 
 function setStatus(message) {
   elements.status.textContent = message;
@@ -54,6 +55,29 @@ function makeUuid() {
     const value = char === "x" ? rand : (rand % 4) + 8;
     return Math.floor(value).toString(16);
   });
+}
+
+function loadStoredToken() {
+  try {
+    const stored = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (stored) {
+      elements.token.value = stored;
+    }
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
+}
+
+function storeToken(value) {
+  try {
+    if (!value) {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(TOKEN_STORAGE_KEY, value);
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
 }
 
 function updateTagPreview() {
@@ -635,7 +659,11 @@ function getTag(prefix) {
 }
 
 elements.tagPrefix.addEventListener("input", updateTagPreview);
+elements.token.addEventListener("input", () => {
+  storeToken(elements.token.value.trim());
+});
 updateTagPreview();
+loadStoredToken();
 
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
