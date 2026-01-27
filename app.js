@@ -1,20 +1,51 @@
 const elements = {
   form: document.querySelector("#controls"),
   token: document.querySelector("#token"),
+  showToken: document.querySelector("#showToken"),
+  rememberToken: document.querySelector("#rememberToken"),
+  tokenHint: document.querySelector("#tokenHint"),
   location: document.querySelector("#location"),
   tagPrefix: document.querySelector("#tagPrefix"),
   applyTags: document.querySelector("#applyTags"),
   archive: document.querySelector("#archive"),
   run: document.querySelector("#run"),
+  cancel: document.querySelector("#cancel"),
   status: document.querySelector("#status"),
   log: document.querySelector("#log"),
   download: document.querySelector("#download"),
+  downloadLog: document.querySelector("#downloadLog"),
   tagPreview: document.querySelector("#tagPreview"),
+  tagHint: document.querySelector("#tagHint"),
+  filterFrom: document.querySelector("#filterFrom"),
+  filterTo: document.querySelector("#filterTo"),
+  filterTag: document.querySelector("#filterTag"),
+  filterHtml: document.querySelector("#filterHtml"),
+  epubTitle: document.querySelector("#epubTitle"),
+  epubAuthor: document.querySelector("#epubAuthor"),
+  epubCover: document.querySelector("#epubCover"),
+  progressFetched: document.querySelector("#progressFetched"),
+  progressSelected: document.querySelector("#progressSelected"),
+  progressBuilt: document.querySelector("#progressBuilt"),
+  progressUpdated: document.querySelector("#progressUpdated"),
+  progressFailed: document.querySelector("#progressFailed"),
 };
 
 const READWISE_API = "https://readwise.io/api/v3";
 const RATE_LIMIT_MS = 3000;
 const TOKEN_STORAGE_KEY = "readwise-epub-dump.token";
+const SETTINGS_STORAGE_KEY = "readwise-epub-dump.settings";
+const DEFAULT_TITLE = "Readwise Export";
+const DEFAULT_AUTHOR = "Readwise";
+
+const progressState = {
+  fetched: 0,
+  selected: 0,
+  built: 0,
+  updated: 0,
+  failed: 0,
+};
+
+let runState = null;
 
 function setStatus(message) {
   elements.status.textContent = message;
@@ -29,8 +60,35 @@ function clearLog() {
   elements.log.textContent = "";
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Canceled."));
+      return;
+    }
+    const timeout = setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      resolve();
+    }, ms);
+
+    function onAbort() {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("Canceled."));
+    }
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort);
+    }
+  });
+}
+
+function assertNotCanceled(signal) {
+  if (signal?.aborted) {
+    throw new Error("Canceled.");
+  }
 }
 
 function escapeXml(value) {
@@ -57,7 +115,65 @@ function makeUuid() {
   });
 }
 
+function normalizeToken(value) {
+  return value.trim().replace(/^Token\s+/i, "");
+}
+
+function updateTokenHint() {
+  const raw = elements.token.value.trim();
+  if (!raw) {
+    elements.tokenHint.textContent = "";
+    return;
+  }
+  if (/^Token\s+/i.test(raw)) {
+    elements.tokenHint.textContent =
+      "Paste only the token value (omit the \"Token \" prefix).";
+    return;
+  }
+  if (raw.length < 20) {
+    elements.tokenHint.textContent = "Token looks short. Double-check the value.";
+    return;
+  }
+  elements.tokenHint.textContent = "";
+}
+
+function updateTagHint(prefix) {
+  if (!prefix) {
+    elements.tagHint.textContent = "";
+    return;
+  }
+  if (/\s/.test(prefix)) {
+    elements.tagHint.textContent = "Avoid spaces in tag prefixes.";
+    return;
+  }
+  if (!/^[a-z0-9_-]+$/i.test(prefix)) {
+    elements.tagHint.textContent = "Use only letters, numbers, dashes, or underscores.";
+    return;
+  }
+  elements.tagHint.textContent = "";
+}
+
+function renderProgress() {
+  elements.progressFetched.textContent = progressState.fetched;
+  elements.progressSelected.textContent = progressState.selected;
+  elements.progressBuilt.textContent = progressState.built;
+  elements.progressUpdated.textContent = progressState.updated;
+  elements.progressFailed.textContent = progressState.failed;
+}
+
+function setProgress(next) {
+  Object.assign(progressState, next);
+  renderProgress();
+}
+
+function resetProgress() {
+  setProgress({ fetched: 0, selected: 0, built: 0, updated: 0, failed: 0 });
+}
+
 function loadStoredToken() {
+  if (!elements.rememberToken.checked) {
+    return;
+  }
   try {
     const stored = localStorage.getItem(TOKEN_STORAGE_KEY);
     if (stored) {
@@ -69,6 +185,9 @@ function loadStoredToken() {
 }
 
 function storeToken(value) {
+  if (!elements.rememberToken.checked) {
+    return;
+  }
   try {
     if (!value) {
       localStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -80,13 +199,100 @@ function storeToken(value) {
   }
 }
 
+function getSettingsFromForm() {
+  return {
+    location: elements.location.value,
+    tagPrefix: elements.tagPrefix.value.trim(),
+    applyTags: elements.applyTags.checked,
+    archive: elements.archive.checked,
+    rememberToken: elements.rememberToken.checked,
+    filters: {
+      from: elements.filterFrom.value,
+      to: elements.filterTo.value,
+      tag: elements.filterTag.value.trim(),
+      onlyHtml: elements.filterHtml.checked,
+    },
+    metadata: {
+      title: elements.epubTitle.value.trim(),
+      author: elements.epubAuthor.value.trim(),
+    },
+  };
+}
+
+function saveSettings() {
+  try {
+    const settings = getSettingsFromForm();
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
+}
+
+function applySettings(settings) {
+  if (!settings || typeof settings !== "object") {
+    return;
+  }
+  if (settings.location) {
+    elements.location.value = settings.location;
+  }
+  if (typeof settings.tagPrefix === "string") {
+    elements.tagPrefix.value = settings.tagPrefix;
+  }
+  if (typeof settings.applyTags === "boolean") {
+    elements.applyTags.checked = settings.applyTags;
+  }
+  if (typeof settings.archive === "boolean") {
+    elements.archive.checked = settings.archive;
+  }
+  if (typeof settings.rememberToken === "boolean") {
+    elements.rememberToken.checked = settings.rememberToken;
+  }
+  if (settings.filters && typeof settings.filters === "object") {
+    if (typeof settings.filters.from === "string") {
+      elements.filterFrom.value = settings.filters.from;
+    }
+    if (typeof settings.filters.to === "string") {
+      elements.filterTo.value = settings.filters.to;
+    }
+    if (typeof settings.filters.tag === "string") {
+      elements.filterTag.value = settings.filters.tag;
+    }
+    if (typeof settings.filters.onlyHtml === "boolean") {
+      elements.filterHtml.checked = settings.filters.onlyHtml;
+    }
+  }
+  if (settings.metadata && typeof settings.metadata === "object") {
+    if (typeof settings.metadata.title === "string") {
+      elements.epubTitle.value = settings.metadata.title;
+    }
+    if (typeof settings.metadata.author === "string") {
+      elements.epubAuthor.value = settings.metadata.author;
+    }
+  }
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+    const settings = JSON.parse(raw);
+    applySettings(settings);
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
+}
+
 function updateTagPreview() {
   const prefix = elements.tagPrefix.value.trim();
   if (!prefix) {
     elements.tagPreview.textContent = "(set a tag prefix)";
+    updateTagHint("");
     return;
   }
   elements.tagPreview.textContent = `${prefix}-${todayUtc()}`;
+  updateTagHint(prefix);
 }
 
 const VOID_ELEMENTS = new Set([
@@ -220,9 +426,9 @@ function parseDataUrl(dataUrl) {
   }
 }
 
-async function fetchImageBytes(url) {
+async function fetchImageBytes(url, signal) {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal });
     if (!response.ok) {
       return null;
     }
@@ -253,13 +459,14 @@ function registerImageAsset(registry, key, mediaType, bytes, sourceUrl) {
   return asset;
 }
 
-async function embedImagesInDocument(doc, baseUrl, registry) {
+async function embedImagesInDocument(doc, baseUrl, registry, options = {}) {
   const images = Array.from(doc.querySelectorAll("img"));
   let inlined = 0;
   let failed = 0;
   let skipped = 0;
 
   for (const img of images) {
+    assertNotCanceled(options.signal);
     const src =
       img.getAttribute("src") ||
       img.getAttribute("data-src") ||
@@ -289,7 +496,7 @@ async function embedImagesInDocument(doc, baseUrl, registry) {
       }
       asset = registry.map.get(resolved);
       if (!asset) {
-        const fetched = await fetchImageBytes(resolved);
+        const fetched = await fetchImageBytes(resolved, options.signal);
         if (!fetched) {
           img.setAttribute("src", resolved);
           failed += 1;
@@ -320,12 +527,13 @@ async function embedImagesInDocument(doc, baseUrl, registry) {
   return { total: images.length, inlined, failed, skipped };
 }
 
-async function fetchAllDocuments(token, location) {
+async function fetchAllDocuments(token, location, options = {}) {
   let cursor = null;
   const items = [];
   let expectedCount = null;
 
   do {
+    assertNotCanceled(options.signal);
     const params = new URLSearchParams();
     params.set("withHtmlContent", "true");
     if (location) {
@@ -335,12 +543,17 @@ async function fetchAllDocuments(token, location) {
       params.set("pageCursor", cursor);
     }
 
-    const response = await fetch(`${READWISE_API}/list/?${params.toString()}`, {
-      headers: {
-        Authorization: `Token ${token}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithRetry(
+      `${READWISE_API}/list/?${params.toString()}`,
+      {
+        headers: {
+          Authorization: `Token ${token}`,
+          "Content-Type": "application/json",
+        },
+        signal: options.signal,
       },
-    });
+      { label: "Fetch articles" }
+    );
 
     if (!response.ok) {
       const body = await response.text();
@@ -354,14 +567,152 @@ async function fetchAllDocuments(token, location) {
 
     items.push(...data.results);
     logLine(`Fetched ${items.length}/${data.count} articles...`);
+    options.onProgress?.({ fetched: items.length, total: data.count });
 
     cursor = data.nextPageCursor || null;
     if (cursor) {
-      await sleep(RATE_LIMIT_MS);
+      await sleep(RATE_LIMIT_MS, options.signal);
     }
   } while (cursor);
 
   return items;
+}
+
+function parseTagFilter(value) {
+  return value
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function applyFilters(items, filters) {
+  const tagNeedles = parseTagFilter(filters.tag || "");
+  const from = filters.from || "";
+  const to = filters.to || "";
+  const onlyHtml = Boolean(filters.onlyHtml);
+  const summary = {
+    total: items.length,
+    selected: 0,
+    removedDate: 0,
+    removedTag: 0,
+    removedHtml: 0,
+    missingDate: 0,
+  };
+  const selected = [];
+
+  for (const item of items) {
+    let include = true;
+    const created = item.created_at ? item.created_at.slice(0, 10) : "";
+
+    if ((from || to) && !created) {
+      include = false;
+      summary.missingDate += 1;
+    }
+    if (include && from && created < from) {
+      include = false;
+      summary.removedDate += 1;
+    }
+    if (include && to && created > to) {
+      include = false;
+      summary.removedDate += 1;
+    }
+
+    if (include && tagNeedles.length > 0) {
+      const tags = Object.keys(item.tags || {}).map((tag) => tag.toLowerCase());
+      const matches = tagNeedles.some((needle) =>
+        tags.some((tag) => tag.includes(needle))
+      );
+      if (!matches) {
+        include = false;
+        summary.removedTag += 1;
+      }
+    }
+
+    if (include && onlyHtml && !item.html_content) {
+      include = false;
+      summary.removedHtml += 1;
+    }
+
+    if (include) {
+      selected.push(item);
+    }
+  }
+
+  summary.selected = selected.length;
+  return { items: selected, summary };
+}
+
+async function getCoverAsset(file) {
+  if (!file) {
+    return null;
+  }
+  const buffer = await file.arrayBuffer();
+  const mediaType = file.type || "image/jpeg";
+  const extension = inferImageExtension(mediaType, file.name);
+  const filename = `cover.${extension}`;
+  return {
+    filename,
+    href: `images/${filename}`,
+    mediaType,
+    bytes: new Uint8Array(buffer),
+  };
+}
+
+function shouldRetryResponse(response) {
+  if (!response) {
+    return true;
+  }
+  if (response.status === 429) {
+    return true;
+  }
+  return response.status >= 500 && response.status < 600;
+}
+
+function getRetryDelay(response, attempt) {
+  const base = 800;
+  const max = 6000;
+  const jitter = Math.random() * 250;
+  let delay = Math.min(max, base * 2 ** attempt) + jitter;
+  if (response) {
+    const retryAfter = response.headers.get("Retry-After");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (!Number.isNaN(seconds)) {
+        delay = Math.max(delay, seconds * 1000);
+      }
+    }
+  }
+  return delay;
+}
+
+async function fetchWithRetry(url, options = {}, config = {}) {
+  const retries = typeof config.retries === "number" ? config.retries : 3;
+  const label = config.label || "Request";
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    assertNotCanceled(options.signal);
+    try {
+      const response = await fetch(url, options);
+      if (!shouldRetryResponse(response) || attempt === retries) {
+        return response;
+      }
+      const delay = getRetryDelay(response, attempt);
+      logLine(`${label} retry ${attempt + 1}/${retries} in ${Math.round(delay)}ms.`);
+      await sleep(delay, options.signal);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      if (attempt === retries) {
+        throw error;
+      }
+      const delay = getRetryDelay(null, attempt);
+      logLine(`${label} retry ${attempt + 1}/${retries} in ${Math.round(delay)}ms.`);
+      await sleep(delay, options.signal);
+    }
+  }
+
+  throw new Error("Request failed after retries.");
 }
 
 function buildContainerXml() {
@@ -427,7 +778,7 @@ ${navPoints}
 </ncx>`;
 }
 
-function buildContentOpf(entries, imageItems, title, author, uid) {
+function buildContentOpf(entries, imageItems, title, author, uid, coverItem) {
   const manifestItems = entries
     .map(
       (entry, index) =>
@@ -437,8 +788,10 @@ function buildContentOpf(entries, imageItems, title, author, uid) {
 
   const imageManifestItems = imageItems
     .map(
-      (item) =>
-        `    <item id="${item.id}" href="${item.href}" media-type="${item.mediaType}" />`
+      (item) => {
+        const props = item.properties ? ` properties="${item.properties}"` : "";
+        return `    <item id="${item.id}" href="${item.href}" media-type="${item.mediaType}"${props} />`;
+      }
     )
     .join("\n");
 
@@ -456,6 +809,7 @@ function buildContentOpf(entries, imageItems, title, author, uid) {
     <dc:creator>${escapeXml(author)}</dc:creator>
     <dc:language>en</dc:language>
     <meta property="dcterms:modified">${modified}</meta>
+    ${coverItem ? `<meta name="cover" content="${coverItem.id}" />` : ""}
   </metadata>
   <manifest>
     <item id="css" href="styles.css" media-type="text/css" />
@@ -470,7 +824,7 @@ ${spineItems}
 </package>`;
 }
 
-async function buildChapterXhtml(item, imageRegistry) {
+async function buildChapterXhtml(item, imageRegistry, options = {}) {
   const title = item.title || "Untitled";
   const author = item.author || "";
   const site = item.site_name || "";
@@ -482,7 +836,9 @@ async function buildChapterXhtml(item, imageRegistry) {
   const doc = parseHtmlContent(item.html_content || "");
   if (doc && doc.body) {
     if (source) {
-      imageStats = await embedImagesInDocument(doc, source, imageRegistry);
+      imageStats = await embedImagesInDocument(doc, source, imageRegistry, {
+        signal: options.signal,
+      });
     }
     content = serializeChildren(doc.body);
   }
@@ -523,6 +879,21 @@ ${content}
 </html>`;
 }
 
+function buildCoverXhtml(title, coverHref) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>${escapeXml(title)}</title>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" type="text/css" href="../styles.css" />
+  </head>
+  <body class="cover">
+    <img src="../${coverHref}" alt="Cover" />
+  </body>
+</html>`;
+}
+
 function buildStylesheet() {
   return `body {
   font-family: serif;
@@ -547,6 +918,19 @@ article img {
   max-width: 100%;
   height: auto;
 }
+
+.cover {
+  margin: 0;
+  padding: 0;
+  text-align: center;
+}
+
+.cover img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
 `;
 }
 
@@ -562,20 +946,47 @@ async function buildEpub(items, options) {
 
   const imageRegistry = { map: new Map(), counter: 0 };
 
-  const entries = items.map((item, index) => ({
-    title: item.title || `Untitled ${index + 1}`,
-    href: `text/item-${index + 1}.xhtml`,
-  }));
+  const entries = [];
+  const coverEntry = options.cover
+    ? { title: "Cover", href: "text/cover.xhtml" }
+    : null;
+  if (coverEntry) {
+    entries.push(coverEntry);
+  }
+  items.forEach((item, index) => {
+    entries.push({
+      title: item.title || `Untitled ${index + 1}`,
+      href: `text/item-${index + 1}.xhtml`,
+    });
+  });
 
   const textDir = oebps.folder("text");
+  if (options.cover) {
+    textDir.file("cover.xhtml", buildCoverXhtml(options.title, options.cover.href));
+  }
   for (const [index, item] of items.entries()) {
-    const chapter = await buildChapterXhtml(item, imageRegistry);
+    assertNotCanceled(options.signal);
+    const chapter = await buildChapterXhtml(item, imageRegistry, {
+      signal: options.signal,
+    });
     textDir.file(`item-${index + 1}.xhtml`, chapter);
+    options.onProgress?.({ built: index + 1, total: items.length });
   }
 
   const imageItems = [];
+  const imagesDir = oebps.folder("images");
+  let coverItem = null;
+  if (options.cover) {
+    imagesDir.file(options.cover.filename, options.cover.bytes);
+    coverItem = {
+      id: "cover-image",
+      href: options.cover.href,
+      mediaType: options.cover.mediaType,
+      properties: "cover-image",
+    };
+    imageItems.push(coverItem);
+  }
   if (imageRegistry.map.size > 0) {
-    const imagesDir = oebps.folder("images");
     for (const asset of imageRegistry.map.values()) {
       imagesDir.file(asset.filename, asset.bytes);
       imageItems.push({
@@ -590,7 +1001,14 @@ async function buildEpub(items, options) {
   oebps.file("toc.ncx", buildTocNcx(entries, options.title, options.uid));
   oebps.file(
     "content.opf",
-    buildContentOpf(entries, imageItems, options.title, options.author, options.uid)
+    buildContentOpf(
+      entries,
+      imageItems,
+      options.title,
+      options.author,
+      options.uid,
+      coverItem
+    )
   );
 
   return zip.generateAsync({
@@ -604,14 +1022,16 @@ async function buildEpub(items, options) {
 async function updateDocuments(items, token, options) {
   if (!options.applyTags && !options.archive) {
     logLine("Skipping tagging and archiving.");
-    return;
+    return { updated: 0, skipped: items.length, failed: 0, failedItems: [] };
   }
 
   let updated = 0;
   let skipped = 0;
   let failed = 0;
+  const failedItems = [];
 
   for (const item of items) {
+    assertNotCanceled(options.signal);
     const payload = {};
     const tags = Object.keys(item.tags || {});
 
@@ -628,27 +1048,42 @@ async function updateDocuments(items, token, options) {
       continue;
     }
 
-    const response = await fetch(`${READWISE_API}/update/${item.id}/`, {
-      method: "PATCH",
-      headers: {
-        Authorization: `Token ${token}`,
-        "Content-Type": "application/json",
+    const response = await fetchWithRetry(
+      `${READWISE_API}/update/${item.id}/`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Token ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: options.signal,
       },
-      body: JSON.stringify(payload),
-    });
+      { label: "Update article" }
+    );
 
     if (response.ok) {
       updated += 1;
     } else {
       failed += 1;
       const body = await response.text();
-      logLine(`Update failed for ${item.title || item.id}: ${response.status} ${body}`);
+      const label = item.title || item.id;
+      failedItems.push(label);
+      logLine(`Update failed for ${label}: ${response.status} ${body}`);
     }
 
-    await sleep(RATE_LIMIT_MS);
+    options.onProgress?.({ updated, failed });
+    await sleep(RATE_LIMIT_MS, options.signal);
   }
 
   logLine(`Tag/archive updates: ${updated} updated, ${skipped} skipped, ${failed} failed.`);
+  if (failedItems.length > 0) {
+    const sample = failedItems.slice(0, 5).join(", ");
+    const more = failedItems.length > 5 ? ` (+${failedItems.length - 5} more)` : "";
+    logLine(`Update failures: ${sample}${more}.`);
+  }
+
+  return { updated, skipped, failed, failedItems };
 }
 
 function getTag(prefix) {
@@ -658,29 +1093,110 @@ function getTag(prefix) {
   return `${prefix}-${todayUtc()}`;
 }
 
-elements.tagPrefix.addEventListener("input", updateTagPreview);
-elements.token.addEventListener("input", () => {
-  storeToken(elements.token.value.trim());
+elements.tagPrefix.addEventListener("input", () => {
+  updateTagPreview();
+  saveSettings();
 });
+elements.location.addEventListener("change", saveSettings);
+elements.applyTags.addEventListener("change", saveSettings);
+elements.archive.addEventListener("change", saveSettings);
+elements.filterFrom.addEventListener("change", saveSettings);
+elements.filterTo.addEventListener("change", saveSettings);
+elements.filterTag.addEventListener("input", saveSettings);
+elements.filterHtml.addEventListener("change", saveSettings);
+elements.epubTitle.addEventListener("input", saveSettings);
+elements.epubAuthor.addEventListener("input", saveSettings);
+elements.rememberToken.addEventListener("change", () => {
+  if (!elements.rememberToken.checked) {
+    try {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch (error) {
+      // Ignore storage errors (private mode, blocked storage, etc.).
+    }
+  } else {
+    storeToken(normalizeToken(elements.token.value));
+  }
+  saveSettings();
+});
+elements.showToken.addEventListener("change", () => {
+  elements.token.type = elements.showToken.checked ? "text" : "password";
+});
+elements.token.addEventListener("input", () => {
+  updateTokenHint();
+  storeToken(normalizeToken(elements.token.value));
+});
+
+elements.downloadLog.addEventListener("click", () => {
+  const content = elements.log.textContent.trim();
+  if (!content) {
+    setStatus("No logs to download yet.");
+    return;
+  }
+  const blob = new Blob([content], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `readwise-epub-log-${todayUtc()}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+});
+
+elements.cancel.addEventListener("click", () => {
+  if (!runState) {
+    return;
+  }
+  setStatus("Canceling...");
+  runState.controller.abort();
+});
+
+loadSettings();
 updateTagPreview();
 loadStoredToken();
+updateTokenHint();
+renderProgress();
 
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (runState) {
+    return;
+  }
   clearLog();
+  resetProgress();
   setStatus("Starting...");
   elements.download.hidden = true;
   elements.run.disabled = true;
+  elements.cancel.disabled = false;
 
-  const token = elements.token.value.trim();
+  const controller = new AbortController();
+  runState = { controller, downloadUrl: null };
+
+  const token = normalizeToken(elements.token.value);
+  elements.token.value = token;
   const location = elements.location.value;
   const tagPrefix = elements.tagPrefix.value.trim();
   const applyTags = elements.applyTags.checked;
   const archive = elements.archive.checked;
+  const filters = {
+    from: elements.filterFrom.value,
+    to: elements.filterTo.value,
+    tag: elements.filterTag.value.trim(),
+    onlyHtml: elements.filterHtml.checked,
+  };
+  const metadataTitle = elements.epubTitle.value.trim();
+  const metadataAuthor = elements.epubAuthor.value.trim();
+
+  if (elements.rememberToken.checked) {
+    storeToken(token);
+  }
+  saveSettings();
 
   if (!token) {
     setStatus("Access token is required.");
     elements.run.disabled = false;
+    elements.cancel.disabled = true;
+    runState = null;
     return;
   }
 
@@ -688,21 +1204,50 @@ elements.form.addEventListener("submit", async (event) => {
   if (applyTags && !tag) {
     setStatus("Tag prefix is required when tagging is enabled.");
     elements.run.disabled = false;
+    elements.cancel.disabled = true;
+    runState = null;
+    return;
+  }
+  if (filters.from && filters.to && filters.from > filters.to) {
+    setStatus("From date must be earlier than To date.");
+    elements.run.disabled = false;
+    elements.cancel.disabled = true;
+    runState = null;
     return;
   }
 
   try {
     setStatus("Fetching articles...");
-    const items = await fetchAllDocuments(token, location);
+    const items = await fetchAllDocuments(token, location, {
+      signal: controller.signal,
+      onProgress: ({ fetched }) => setProgress({ fetched }),
+    });
+    setProgress({ fetched: items.length });
 
     const sorted = items
       .slice()
       .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-    const withHtml = sorted.filter((item) => item.html_content).length;
-    logLine(`Readwise HTML available for ${withHtml}/${sorted.length} articles.`);
+    const { items: filtered, summary } = applyFilters(sorted, filters);
+    setProgress({ selected: summary.selected });
 
-    for (const item of sorted) {
+    logLine(`Filters: ${summary.selected}/${summary.total} articles selected.`);
+    if (summary.removedDate > 0 || summary.missingDate > 0) {
+      logLine(
+        `Date filter removed ${summary.removedDate} items, ${summary.missingDate} missing dates.`
+      );
+    }
+    if (summary.removedTag > 0) {
+      logLine(`Tag filter removed ${summary.removedTag} items.`);
+    }
+    if (summary.removedHtml > 0) {
+      logLine(`HTML filter removed ${summary.removedHtml} items.`);
+    }
+
+    const withHtml = filtered.filter((item) => item.html_content).length;
+    logLine(`Readwise HTML available for ${withHtml}/${filtered.length} articles.`);
+
+    for (const item of filtered) {
       const title = item.title || "Untitled";
       if (item.html_content) {
         logLine(`Using Readwise HTML for: ${title}`);
@@ -711,17 +1256,28 @@ elements.form.addEventListener("submit", async (event) => {
       }
     }
 
-    const title = `Readwise Export ${todayUtc()}`;
+    assertNotCanceled(controller.signal);
+    const title = metadataTitle || `${DEFAULT_TITLE} ${todayUtc()}`;
+    const author = metadataAuthor || DEFAULT_AUTHOR;
     const uid = makeUuid();
+    const coverFile = elements.epubCover.files[0] || null;
+    const coverAsset = coverFile ? await getCoverAsset(coverFile) : null;
 
     setStatus("Building EPUB...");
-    const epubBlob = await buildEpub(sorted, {
+    const epubBlob = await buildEpub(filtered, {
       title,
-      author: "Readwise",
+      author,
       uid,
+      cover: coverAsset,
+      signal: controller.signal,
+      onProgress: ({ built }) => setProgress({ built }),
     });
 
+    if (runState?.downloadUrl) {
+      URL.revokeObjectURL(runState.downloadUrl);
+    }
     const epubUrl = URL.createObjectURL(epubBlob);
+    runState.downloadUrl = epubUrl;
     elements.download.href = epubUrl;
     elements.download.download = `readwise-${todayUtc()}.epub`;
     elements.download.hidden = false;
@@ -738,17 +1294,26 @@ elements.form.addEventListener("submit", async (event) => {
       if (archive) {
         logLine("Archiving enabled.");
       }
-      await updateDocuments(sorted, token, {
+      await updateDocuments(filtered, token, {
         applyTags,
         archive,
         tag: tagValue,
+        signal: controller.signal,
+        onProgress: ({ updated, failed }) => setProgress({ updated, failed }),
       });
       setStatus("Export complete.");
     }
   } catch (error) {
-    setStatus("Failed.");
-    logLine(error.message || String(error));
+    if (error?.message === "Canceled." || error?.name === "AbortError") {
+      setStatus("Canceled.");
+      logLine("Run canceled.");
+    } else {
+      setStatus("Failed.");
+      logLine(error.message || String(error));
+    }
   } finally {
     elements.run.disabled = false;
+    elements.cancel.disabled = true;
+    runState = null;
   }
 });

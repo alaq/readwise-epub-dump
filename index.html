@@ -21,14 +21,25 @@
             Readwise access token
             <input id="token" type="password" placeholder="Token XXX" required />
           </label>
+          <div class="option-row">
+            <label class="inline">
+              <input id="showToken" type="checkbox" />
+              Show token
+            </label>
+            <label class="inline">
+              <input id="rememberToken" type="checkbox" />
+              Remember token on this device
+            </label>
+          </div>
           <p class="helper">
             Get your token at
             <a href="https://readwise.io/access_token" target="_blank" rel="noreferrer">
               readwise.io/access_token
             </a>.
             Click “Get Access Token” and paste it here.
-            It is stored locally in your browser to prefill next time.
+            Stored locally only when enabled above.
           </p>
+          <p id="tokenHint" class="helper hint" aria-live="polite"></p>
 
           <label>
             Location
@@ -60,14 +71,82 @@
           <div class="tag-preview">
             Tag preview: <span id="tagPreview">(set a tag prefix)</span>
           </div>
+          <p id="tagHint" class="helper hint" aria-live="polite"></p>
 
-          <button id="run" type="submit">Fetch and build EPUB</button>
+          <div class="section">
+            <h3>Filters</h3>
+            <div class="grid two">
+              <label>
+                From date
+                <input id="filterFrom" type="date" />
+              </label>
+              <label>
+                To date
+                <input id="filterTo" type="date" />
+              </label>
+            </div>
+            <label>
+              Tag filter
+              <input id="filterTag" type="text" placeholder="daily, readwise" />
+            </label>
+            <label class="inline">
+              <input id="filterHtml" type="checkbox" />
+              Only include items with HTML content
+            </label>
+            <p class="helper">Tag filter matches partial tag names (case insensitive).</p>
+          </div>
+
+          <div class="section">
+            <h3>EPUB metadata</h3>
+            <label>
+              Title
+              <input id="epubTitle" type="text" placeholder="Readwise Export" />
+            </label>
+            <label>
+              Author
+              <input id="epubAuthor" type="text" placeholder="Readwise" />
+            </label>
+            <label>
+              Cover image (optional)
+              <input id="epubCover" type="file" accept="image/*" />
+            </label>
+            <p class="helper">Cover images are embedded as the first page.</p>
+          </div>
+
+          <div class="action-row">
+            <button id="run" type="submit">Fetch and build EPUB</button>
+            <button id="cancel" type="button" class="button secondary" disabled>
+              Cancel
+            </button>
+          </div>
         </form>
       </section>
 
       <section class="card">
         <h2>Status</h2>
         <div id="status" class="status">Idle</div>
+        <div class="progress">
+          <div>
+            <span class="progress-label">Fetched</span>
+            <span id="progressFetched">0</span>
+          </div>
+          <div>
+            <span class="progress-label">Selected</span>
+            <span id="progressSelected">0</span>
+          </div>
+          <div>
+            <span class="progress-label">Built</span>
+            <span id="progressBuilt">0</span>
+          </div>
+          <div>
+            <span class="progress-label">Updated</span>
+            <span id="progressUpdated">0</span>
+          </div>
+          <div>
+            <span class="progress-label">Failed</span>
+            <span id="progressFailed">0</span>
+          </div>
+        </div>
         <div class="actions">
           <a id="download" class="button" href="#" download hidden>Download EPUB</a>
         </div>
@@ -75,6 +154,9 @@
 
       <section class="card log-card">
         <h2>Logs</h2>
+        <div class="actions log-actions">
+          <button id="downloadLog" type="button" class="button ghost">Download logs</button>
+        </div>
         <pre id="log" class="log"></pre>
       </section>
 
