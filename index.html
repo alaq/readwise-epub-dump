@@ -110,7 +110,38 @@
               Cover image (optional)
               <input id="epubCover" type="file" accept="image/*" />
             </label>
-            <p class="helper">Cover images are embedded as the first page.</p>
+            <label class="inline">
+              <input id="generateCover" type="checkbox" />
+              Generate a cover with gpt-image-2
+            </label>
+            <div id="aiCoverFields" class="subsection" hidden>
+              <label>
+                OpenAI API key
+                <input id="openaiKey" type="password" placeholder="sk-..." autocomplete="off" />
+              </label>
+              <div class="option-row">
+                <label class="inline">
+                  <input id="showOpenaiKey" type="checkbox" />
+                  Show OpenAI key
+                </label>
+              </div>
+              <label>
+                Cover quality
+                <select id="coverQuality">
+                  <option value="low">low</option>
+                  <option value="medium" selected>medium</option>
+                  <option value="high">high</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+              <p class="helper">
+                Uses EPUB metadata, article titles, and short sampled excerpts only.
+                Full article text is not sent to OpenAI.
+              </p>
+            </div>
+            <p class="helper">
+              Cover images are embedded as the first page. Generated covers override uploaded files.
+            </p>
           </div>
 
           <div class="action-row">
@@ -162,7 +193,8 @@
 
       <footer class="footer">
         <p>
-          Everything happens in your browser. Your token never leaves your computer.
+          No backend server. Credentials are sent only from your browser to Readwise,
+          and to OpenAI when generated covers are enabled.
         </p>
         <p>
           <a href="https://github.com/alaq/readwise-epub-dump" target="_blank" rel="noreferrer">

@@ -91,6 +91,19 @@ select {
   border-top: 1px dashed var(--line);
 }
 
+.subsection {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff6e8;
+}
+
+.subsection[hidden] {
+  display: none;
+}
+
 .section h3 {
   margin: 0;
   font-size: 1.05rem;

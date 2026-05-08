@@ -23,6 +23,11 @@ const elements = {
   epubTitle: document.querySelector("#epubTitle"),
   epubAuthor: document.querySelector("#epubAuthor"),
   epubCover: document.querySelector("#epubCover"),
+  generateCover: document.querySelector("#generateCover"),
+  aiCoverFields: document.querySelector("#aiCoverFields"),
+  openaiKey: document.querySelector("#openaiKey"),
+  showOpenaiKey: document.querySelector("#showOpenaiKey"),
+  coverQuality: document.querySelector("#coverQuality"),
   progressFetched: document.querySelector("#progressFetched"),
   progressSelected: document.querySelector("#progressSelected"),
   progressBuilt: document.querySelector("#progressBuilt"),
@@ -31,11 +36,16 @@ const elements = {
 };
 
 const READWISE_API = "https://readwise.io/api/v3";
+const OPENAI_IMAGES_API = "https://api.openai.com/v1/images/generations";
+const OPENAI_COVER_MODEL = "gpt-image-2";
 const RATE_LIMIT_MS = 3000;
 const TOKEN_STORAGE_KEY = "readwise-epub-dump.token";
 const SETTINGS_STORAGE_KEY = "readwise-epub-dump.settings";
 const DEFAULT_TITLE = "Readwise Export";
 const DEFAULT_AUTHOR = "Readwise";
+const COVER_CONTEXT_MAX_CHARS = 6000;
+const COVER_SAMPLE_ITEM_LIMIT = 12;
+const COVER_EXCERPT_MAX_CHARS = 320;
 
 const progressState = {
   fetched: 0,
@@ -216,6 +226,10 @@ function getSettingsFromForm() {
       title: elements.epubTitle.value.trim(),
       author: elements.epubAuthor.value.trim(),
     },
+    cover: {
+      generate: elements.generateCover.checked,
+      quality: elements.coverQuality.value,
+    },
   };
 }
 
@@ -269,6 +283,14 @@ function applySettings(settings) {
       elements.epubAuthor.value = settings.metadata.author;
     }
   }
+  if (settings.cover && typeof settings.cover === "object") {
+    if (typeof settings.cover.generate === "boolean") {
+      elements.generateCover.checked = settings.cover.generate;
+    }
+    if (typeof settings.cover.quality === "string") {
+      elements.coverQuality.value = settings.cover.quality;
+    }
+  }
 }
 
 function loadSettings() {
@@ -293,6 +315,14 @@ function updateTagPreview() {
   }
   elements.tagPreview.textContent = `${prefix}-${todayUtc()}`;
   updateTagHint(prefix);
+}
+
+function updateCoverControls() {
+  const enabled = elements.generateCover.checked;
+  elements.aiCoverFields.hidden = !enabled;
+  elements.openaiKey.disabled = !enabled;
+  elements.showOpenaiKey.disabled = !enabled;
+  elements.coverQuality.disabled = !enabled;
 }
 
 const VOID_ELEMENTS = new Set([
@@ -401,6 +431,15 @@ function inferImageExtension(mediaType, sourceUrl) {
   return "bin";
 }
 
+function base64ToBytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 function parseDataUrl(dataUrl) {
   const match = dataUrl.match(/^data:([^;,]*)(;base64)?,(.*)$/);
   if (!match) {
@@ -411,12 +450,7 @@ function parseDataUrl(dataUrl) {
   const dataPart = match[3] || "";
   try {
     if (isBase64) {
-      const binary = atob(dataPart);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return { mediaType, bytes };
+      return { mediaType, bytes: base64ToBytes(dataPart) };
     }
     const decoded = decodeURIComponent(dataPart);
     const bytes = new TextEncoder().encode(decoded);
@@ -640,6 +674,172 @@ function applyFilters(items, filters) {
 
   summary.selected = selected.length;
   return { items: selected, summary };
+}
+
+function normalizeWhitespace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function truncateText(value, maxChars) {
+  const normalized = normalizeWhitespace(value);
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  const trimmed = normalized.slice(0, maxChars).replace(/\s+\S*$/, "");
+  return `${trimmed}...`;
+}
+
+function htmlToText(html) {
+  if (!html) {
+    return "";
+  }
+  const doc = parseHtmlContent(html);
+  return normalizeWhitespace(doc?.body?.textContent || "");
+}
+
+function getItemExcerpt(item) {
+  const directExcerpt =
+    item.summary || item.excerpt || item.description || item.notes || "";
+  const text = directExcerpt || htmlToText(item.html_content || "");
+  return truncateText(text, COVER_EXCERPT_MAX_CHARS);
+}
+
+function getItemTags(item) {
+  return Object.keys(item.tags || {}).slice(0, 5).join(", ");
+}
+
+function selectRepresentativeItems(items, limit) {
+  if (items.length <= limit) {
+    return items;
+  }
+
+  const selected = [];
+  const seen = new Set();
+  for (let index = 0; index < limit; index += 1) {
+    const sourceIndex = Math.round((index * (items.length - 1)) / (limit - 1));
+    if (seen.has(sourceIndex)) {
+      continue;
+    }
+    seen.add(sourceIndex);
+    selected.push(items[sourceIndex]);
+  }
+  return selected;
+}
+
+function buildCoverContext(items, metadata) {
+  const sampledItems = selectRepresentativeItems(items, COVER_SAMPLE_ITEM_LIMIT);
+  const lines = [
+    `EPUB title: ${metadata.title}`,
+    `EPUB author: ${metadata.author}`,
+    `Article count: ${items.length}`,
+    `Sampled article context: ${sampledItems.length} representative items, each truncated.`,
+  ];
+
+  for (const [index, item] of sampledItems.entries()) {
+    const title = normalizeWhitespace(item.title || `Untitled ${index + 1}`);
+    const byline = [item.author, item.site_name].filter(Boolean).join(" / ");
+    const tags = getItemTags(item);
+    const excerpt = getItemExcerpt(item);
+    const parts = [`${index + 1}. ${title}`];
+    if (byline) {
+      parts.push(`Source: ${normalizeWhitespace(byline)}`);
+    }
+    if (tags) {
+      parts.push(`Tags: ${normalizeWhitespace(tags)}`);
+    }
+    if (excerpt) {
+      parts.push(`Excerpt: ${excerpt}`);
+    }
+    lines.push(parts.join("\n"));
+
+    if (lines.join("\n\n").length >= COVER_CONTEXT_MAX_CHARS) {
+      break;
+    }
+  }
+
+  return truncateText(lines.join("\n\n"), COVER_CONTEXT_MAX_CHARS);
+}
+
+function buildCoverPrompt(items, metadata) {
+  const context = buildCoverContext(items, metadata);
+  const prompt = `Create a portrait EPUB cover image inspired by this Readwise reading collection.
+
+Design goals:
+- Refined editorial book cover, suitable for an e-reader library thumbnail.
+- Abstract or metaphorical composition inspired by the themes in the sampled context.
+- Warm, serious, literary visual tone with strong contrast and a clear focal point.
+- No screenshots, browser UI, article cards, watermarks, logos, author portraits, or collages of tiny text.
+- Do not render readable words, letters, title text, or fake typography inside the image.
+
+Use only this bounded, sampled context:
+${context}`;
+
+  return {
+    prompt,
+    contextLength: context.length,
+    sampledCount: selectRepresentativeItems(items, COVER_SAMPLE_ITEM_LIMIT).length,
+  };
+}
+
+async function readOpenAiError(response) {
+  const body = await response.text();
+  if (!body) {
+    return `${response.status} ${response.statusText}`;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    return parsed.error?.message || body;
+  } catch (error) {
+    return body;
+  }
+}
+
+async function generateCoverAsset(apiKey, items, metadata, options = {}) {
+  const promptData = buildCoverPrompt(items, metadata);
+  logLine(
+    `Generating cover with ${OPENAI_COVER_MODEL}: ${promptData.sampledCount}/${items.length} sampled articles, ${promptData.contextLength} context chars.`
+  );
+
+  const response = await fetchWithRetry(
+    OPENAI_IMAGES_API,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_COVER_MODEL,
+        prompt: promptData.prompt,
+        n: 1,
+        size: "1024x1536",
+        quality: options.quality || "medium",
+        output_format: "jpeg",
+        background: "opaque",
+        moderation: "auto",
+      }),
+      signal: options.signal,
+    },
+    { label: "Generate cover", retries: 2 }
+  );
+
+  if (!response.ok) {
+    const message = await readOpenAiError(response);
+    throw new Error(`Cover generation failed (${response.status}): ${message}`);
+  }
+
+  const data = await response.json();
+  const image = data?.data?.[0];
+  if (!image?.b64_json) {
+    throw new Error("Cover generation succeeded but no image data was returned.");
+  }
+
+  return {
+    filename: "cover.jpg",
+    href: "images/cover.jpg",
+    mediaType: "image/jpeg",
+    bytes: base64ToBytes(image.b64_json),
+  };
 }
 
 async function getCoverAsset(file) {
@@ -1106,6 +1306,14 @@ elements.filterTag.addEventListener("input", saveSettings);
 elements.filterHtml.addEventListener("change", saveSettings);
 elements.epubTitle.addEventListener("input", saveSettings);
 elements.epubAuthor.addEventListener("input", saveSettings);
+elements.generateCover.addEventListener("change", () => {
+  updateCoverControls();
+  saveSettings();
+});
+elements.coverQuality.addEventListener("change", saveSettings);
+elements.showOpenaiKey.addEventListener("change", () => {
+  elements.openaiKey.type = elements.showOpenaiKey.checked ? "text" : "password";
+});
 elements.rememberToken.addEventListener("change", () => {
   if (!elements.rememberToken.checked) {
     try {
@@ -1153,6 +1361,7 @@ elements.cancel.addEventListener("click", () => {
 
 loadSettings();
 updateTagPreview();
+updateCoverControls();
 loadStoredToken();
 updateTokenHint();
 renderProgress();
@@ -1186,6 +1395,9 @@ elements.form.addEventListener("submit", async (event) => {
   };
   const metadataTitle = elements.epubTitle.value.trim();
   const metadataAuthor = elements.epubAuthor.value.trim();
+  const generateCover = elements.generateCover.checked;
+  const openaiKey = elements.openaiKey.value.trim();
+  const coverQuality = elements.coverQuality.value;
 
   if (elements.rememberToken.checked) {
     storeToken(token);
@@ -1194,6 +1406,13 @@ elements.form.addEventListener("submit", async (event) => {
 
   if (!token) {
     setStatus("Access token is required.");
+    elements.run.disabled = false;
+    elements.cancel.disabled = true;
+    runState = null;
+    return;
+  }
+  if (generateCover && !openaiKey) {
+    setStatus("OpenAI API key is required when generated covers are enabled.");
     elements.run.disabled = false;
     elements.cancel.disabled = true;
     runState = null;
@@ -1261,7 +1480,25 @@ elements.form.addEventListener("submit", async (event) => {
     const author = metadataAuthor || DEFAULT_AUTHOR;
     const uid = makeUuid();
     const coverFile = elements.epubCover.files[0] || null;
-    const coverAsset = coverFile ? await getCoverAsset(coverFile) : null;
+    let coverAsset = null;
+    if (generateCover) {
+      if (coverFile) {
+        logLine("Generated cover enabled; uploaded cover file will be ignored.");
+      }
+      setStatus("Generating cover...");
+      coverAsset = await generateCoverAsset(
+        openaiKey,
+        filtered,
+        { title, author },
+        {
+          quality: coverQuality,
+          signal: controller.signal,
+        }
+      );
+      logLine("Generated cover image ready.");
+    } else if (coverFile) {
+      coverAsset = await getCoverAsset(coverFile);
+    }
 
     setStatus("Building EPUB...");
     const epubBlob = await buildEpub(filtered, {
