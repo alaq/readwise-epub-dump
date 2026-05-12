@@ -45,12 +45,11 @@ const OPENAI_KEY_STORAGE_KEY = "readwise-epub-dump.openai-key";
 const SETTINGS_STORAGE_KEY = "readwise-epub-dump.settings";
 const DEFAULT_TITLE = "Readwise Export";
 const DEFAULT_AUTHOR = "Readwise";
-const COVER_CONTEXT_MAX_CHARS = 6000;
-const COVER_SAMPLE_ITEM_LIMIT = 12;
+const COVER_FEATURE_CONTEXT_MAX_CHARS = 2200;
 const COVER_EXCERPT_MAX_CHARS = 320;
 const COVER_WIDTH = 1024;
 const COVER_HEIGHT = 1536;
-const COVER_INDEX_ITEM_LIMIT = 6;
+const COVER_LINE_ITEM_LIMIT = 5;
 
 const progressState = {
   fetched: 0,
@@ -118,6 +117,44 @@ function escapeXml(value) {
 
 function todayUtc() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function getOrdinalSuffix(day) {
+  if (day >= 11 && day <= 13) {
+    return "th";
+  }
+  switch (day % 10) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+function formatDisplayDate(value = new Date()) {
+  const date =
+    typeof value === "string"
+      ? new Date(`${value.slice(0, 10)}T00:00:00Z`)
+      : value;
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const month = date.toLocaleString("en-US", {
+    month: "long",
+    timeZone: "UTC",
+  });
+  const day = date.getUTCDate();
+  const year = date.getUTCFullYear();
+  return `${month} ${day}${getOrdinalSuffix(day)}, ${year}`;
+}
+
+function todayDisplayDate() {
+  return formatDisplayDate(todayUtc());
 }
 
 function makeUuid() {
@@ -771,39 +808,57 @@ function getItemTags(item) {
   return Object.keys(item.tags || {}).slice(0, 5).join(", ");
 }
 
-function selectRepresentativeItems(items, limit) {
-  if (items.length <= limit) {
-    return items;
-  }
-
-  const selected = [];
-  const seen = new Set();
-  for (let index = 0; index < limit; index += 1) {
-    const sourceIndex = Math.round((index * (items.length - 1)) / (limit - 1));
-    if (seen.has(sourceIndex)) {
-      continue;
-    }
-    seen.add(sourceIndex);
-    selected.push(items[sourceIndex]);
-  }
-  return selected;
+function getItemIdentity(item) {
+  return item.id || item.source_url || item.url || item.title || "";
 }
 
-function buildCoverContext(items, metadata) {
-  const sampledItems = selectRepresentativeItems(items, COVER_SAMPLE_ITEM_LIMIT);
+function scoreCoverFeatureItem(item) {
+  const title = normalizeWhitespace(item.title || "");
+  const excerpt = getItemExcerpt(item);
+  let score = Math.min(title.length, 90) + Math.min(excerpt.length, 360);
+  if (item.author || item.site_name) {
+    score += 35;
+  }
+  if (getItemTags(item)) {
+    score += 25;
+  }
+  if (item.html_content) {
+    score += 15;
+  }
+  return score;
+}
+
+function chooseCoverFeatureItem(items) {
+  if (items.length === 0) {
+    return null;
+  }
+  return items.reduce((best, item) =>
+    scoreCoverFeatureItem(item) > scoreCoverFeatureItem(best) ? item : best
+  );
+}
+
+function getCoverLineItems(items, featuredItem) {
+  const featuredIdentity = featuredItem ? getItemIdentity(featuredItem) : "";
+  return items
+    .filter((item) => getItemIdentity(item) !== featuredIdentity)
+    .slice(0, COVER_LINE_ITEM_LIMIT);
+}
+
+function buildFeaturedArticleContext(featuredItem, metadata, articleCount) {
   const lines = [
     `EPUB title: ${metadata.title}`,
     `EPUB author: ${metadata.author}`,
-    `Article count: ${items.length}`,
-    `Sampled article context: ${sampledItems.length} representative items, each truncated.`,
+    `Issue date: ${metadata.date}`,
+    `Article count in EPUB: ${articleCount}`,
+    "Featured article selected for cover image:",
   ];
 
-  for (const [index, item] of sampledItems.entries()) {
-    const title = normalizeWhitespace(item.title || `Untitled ${index + 1}`);
-    const byline = [item.author, item.site_name].filter(Boolean).join(" / ");
-    const tags = getItemTags(item);
-    const excerpt = getItemExcerpt(item);
-    const parts = [`${index + 1}. ${title}`];
+  if (featuredItem) {
+    const title = normalizeWhitespace(featuredItem.title || "Untitled");
+    const byline = [featuredItem.author, featuredItem.site_name].filter(Boolean).join(" / ");
+    const tags = getItemTags(featuredItem);
+    const excerpt = getItemExcerpt(featuredItem);
+    const parts = [`Title: ${title}`];
     if (byline) {
       parts.push(`Source: ${normalizeWhitespace(byline)}`);
     }
@@ -814,34 +869,32 @@ function buildCoverContext(items, metadata) {
       parts.push(`Excerpt: ${excerpt}`);
     }
     lines.push(parts.join("\n"));
-
-    if (lines.join("\n\n").length >= COVER_CONTEXT_MAX_CHARS) {
-      break;
-    }
   }
 
-  return truncateText(lines.join("\n\n"), COVER_CONTEXT_MAX_CHARS);
+  return truncateText(lines.join("\n\n"), COVER_FEATURE_CONTEXT_MAX_CHARS);
 }
 
 function buildCoverPrompt(items, metadata) {
-  const context = buildCoverContext(items, metadata);
-  const prompt = `Create a portrait EPUB cover background inspired by this Readwise reading collection.
+  const featuredItem = chooseCoverFeatureItem(items);
+  const context = buildFeaturedArticleContext(featuredItem, metadata, items.length);
+  const prompt = `Create a portrait editorial magazine-cover image for a reading digest.
 
 Design goals:
-- Refined editorial book cover artwork, suitable for an e-reader library thumbnail.
-- Abstract or metaphorical composition inspired by the themes in the sampled context.
-- Warm, serious, literary visual tone with strong contrast and a clear focal point.
-- Leave clean negative space near the top and lower third for overlaid title and index text.
+- Classic newsweekly cover art inspired by TIME magazine composition, but without using the TIME logo or any real masthead.
+- Base the visual concept only on the single featured article below. Do not incorporate themes from any other article.
+- Prefer a light cream or white background, high-key lighting, and a clean central subject over a dark full-bleed image.
+- Refined editorial illustration or photo-illustration, suitable for an e-reader library thumbnail.
+- Leave clean negative space around the top, edges, and lower third for overlaid masthead, date, headline, and article lines.
 - No screenshots, browser UI, article cards, watermarks, logos, author portraits, or collages of tiny text.
 - Do not render readable words, letters, title text, or fake typography inside the image; text will be added later.
 
-Use only this bounded, sampled context:
+Use only this bounded featured-article context for the image:
 ${context}`;
 
   return {
     prompt,
     contextLength: context.length,
-    sampledCount: selectRepresentativeItems(items, COVER_SAMPLE_ITEM_LIMIT).length,
+    featuredItem,
   };
 }
 
@@ -863,15 +916,15 @@ function loadImageFromAsset(asset) {
   });
 }
 
-function drawCoverImage(ctx, image, width, height) {
+function drawCoverImage(ctx, image, x, y, width, height) {
   const imageWidth = image.naturalWidth || image.width;
   const imageHeight = image.naturalHeight || image.height;
   const scale = Math.max(width / imageWidth, height / imageHeight);
   const drawWidth = imageWidth * scale;
   const drawHeight = imageHeight * scale;
-  const x = (width - drawWidth) / 2;
-  const y = (height - drawHeight) / 2;
-  ctx.drawImage(image, x, y, drawWidth, drawHeight);
+  const drawX = x + (width - drawWidth) / 2;
+  const drawY = y + (height - drawHeight) / 2;
+  ctx.drawImage(image, drawX, drawY, drawWidth, drawHeight);
 }
 
 function truncateCanvasText(ctx, value, maxWidth) {
@@ -931,88 +984,122 @@ function drawWrappedCanvasText(ctx, lines, x, y, lineHeight) {
   }
 }
 
-function drawGeneratedCoverTypography(ctx, items, metadata) {
+function drawMagazineCoverBase(ctx) {
   const width = COVER_WIDTH;
   const height = COVER_HEIGHT;
-  const margin = 84;
-  const textWidth = width - margin * 2;
+  const paper = ctx.createLinearGradient(0, 0, 0, height);
+  paper.addColorStop(0, "#fffdf7");
+  paper.addColorStop(0.58, "#f7efe4");
+  paper.addColorStop(1, "#fffaf1");
+  ctx.fillStyle = paper;
+  ctx.fillRect(0, 0, width, height);
 
-  const topGradient = ctx.createLinearGradient(0, 0, 0, height * 0.58);
-  topGradient.addColorStop(0, "rgba(21, 17, 13, 0.86)");
-  topGradient.addColorStop(0.7, "rgba(21, 17, 13, 0.42)");
-  topGradient.addColorStop(1, "rgba(21, 17, 13, 0)");
-  ctx.fillStyle = topGradient;
-  ctx.fillRect(0, 0, width, height * 0.58);
-
-  const bottomGradient = ctx.createLinearGradient(0, height * 0.52, 0, height);
-  bottomGradient.addColorStop(0, "rgba(21, 17, 13, 0)");
-  bottomGradient.addColorStop(0.35, "rgba(21, 17, 13, 0.52)");
-  bottomGradient.addColorStop(1, "rgba(21, 17, 13, 0.9)");
-  ctx.fillStyle = bottomGradient;
-  ctx.fillRect(0, height * 0.52, width, height * 0.48);
-
-  ctx.strokeStyle = "rgba(255, 250, 241, 0.58)";
-  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#d71920";
+  ctx.lineWidth = 26;
   ctx.strokeRect(36, 36, width - 72, height - 72);
+  ctx.strokeStyle = "rgba(31, 28, 23, 0.14)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(58, 58, width - 116, height - 116);
+}
+
+function drawCoverImageFrame(ctx, image) {
+  const x = 112;
+  const y = 360;
+  const width = COVER_WIDTH - x * 2;
+  const height = 620;
+
+  ctx.save();
+  ctx.fillStyle = "#fffaf1";
+  ctx.fillRect(x - 12, y - 12, width + 24, height + 24);
+  ctx.strokeStyle = "rgba(31, 28, 23, 0.18)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x - 12, y - 12, width + 24, height + 24);
+
+  ctx.beginPath();
+  ctx.rect(x, y, width, height);
+  ctx.clip();
+  drawCoverImage(ctx, image, x, y, width, height);
+  ctx.fillStyle = "rgba(255, 250, 241, 0.18)";
+  ctx.fillRect(x, y, width, height);
+  ctx.restore();
+}
+
+function drawGeneratedCoverTypography(ctx, items, metadata, featuredItem) {
+  const width = COVER_WIDTH;
+  const margin = 82;
+  const textWidth = width - margin * 2;
+  const featuredTitle = featuredItem?.title || metadata.title || DEFAULT_TITLE;
 
   ctx.save();
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#fffaf1";
-  ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-  ctx.shadowBlur = 10;
-  ctx.shadowOffsetY = 4;
 
-  const title = metadata.title || DEFAULT_TITLE;
-  let titleSize = 90;
+  ctx.fillStyle = "#d71920";
+  ctx.font = '700 142px Georgia, "Times New Roman", serif';
+  ctx.textAlign = "center";
+  ctx.fillText("READWISE", width / 2, 78);
+
+  ctx.fillStyle = "#1f1c17";
+  ctx.font = "700 24px Arial, sans-serif";
+  ctx.fillText("READER EXPORT", width / 2, 226);
+  ctx.font = "400 23px Arial, sans-serif";
+  ctx.fillText(metadata.date || todayDisplayDate(), width / 2, 258);
+
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#d71920";
+  ctx.font = "700 26px Arial, sans-serif";
+  ctx.fillText("FEATURE", margin, 1018);
+
+  ctx.fillStyle = "#1f1c17";
+  let titleSize = 54;
   let titleLines = [];
-  let titleLineHeight = 100;
+  let titleLineHeight = 64;
   do {
     ctx.font = `700 ${titleSize}px Georgia, "Times New Roman", serif`;
-    titleLineHeight = Math.round(titleSize * 1.08);
-    titleLines = wrapCanvasText(ctx, title, textWidth, 4);
-    titleSize -= 6;
-  } while (titleLines.length * titleLineHeight > 410 && titleSize >= 56);
+    titleLineHeight = Math.round(titleSize * 1.12);
+    titleLines = wrapCanvasText(ctx, featuredTitle, textWidth, 3);
+    titleSize -= 4;
+  } while (titleLines.length * titleLineHeight > 192 && titleSize >= 38);
 
-  let y = 110;
-  drawWrappedCanvasText(ctx, titleLines, margin, y, titleLineHeight);
-  y += titleLines.length * titleLineHeight + 28;
+  drawWrappedCanvasText(ctx, titleLines, margin, 1054, titleLineHeight);
 
   if (metadata.author) {
-    ctx.font = '400 34px Georgia, "Times New Roman", serif';
-    ctx.fillStyle = "rgba(255, 250, 241, 0.88)";
-    ctx.fillText(truncateCanvasText(ctx, metadata.author, textWidth), margin, y);
+    ctx.font = "400 24px Arial, sans-serif";
+    ctx.fillStyle = "rgba(31, 28, 23, 0.72)";
+    ctx.fillText(truncateCanvasText(ctx, metadata.author, textWidth), margin, 1260);
   }
 
-  const indexItems = items.slice(0, COVER_INDEX_ITEM_LIMIT);
-  if (indexItems.length > 0) {
-    const indexTop = height - 430;
-    ctx.shadowBlur = 8;
-    ctx.fillStyle = "rgba(255, 250, 241, 0.92)";
-    ctx.font = "700 30px Arial, sans-serif";
-    ctx.fillText("INDEX", margin, indexTop);
+  const lineItems = getCoverLineItems(items, featuredItem);
+  if (lineItems.length > 0) {
+    const insideX = 575;
+    const insideY = 1308;
+    const insideWidth = width - insideX - margin;
+    ctx.fillStyle = "#d71920";
+    ctx.font = "700 24px Arial, sans-serif";
+    ctx.fillText("INSIDE", insideX, insideY);
 
-    ctx.strokeStyle = "rgba(255, 250, 241, 0.55)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(margin, indexTop + 44);
-    ctx.lineTo(width - margin, indexTop + 44);
-    ctx.stroke();
-
-    ctx.font = '400 29px Georgia, "Times New Roman", serif';
-    ctx.fillStyle = "rgba(255, 250, 241, 0.9)";
-    let itemY = indexTop + 70;
-    for (const [index, item] of indexItems.entries()) {
-      const itemTitle = item.title || `Untitled ${index + 1}`;
-      const line = `${index + 1}. ${truncateCanvasText(ctx, itemTitle, textWidth - 46)}`;
-      ctx.fillText(line, margin, itemY);
-      itemY += 45;
+    ctx.fillStyle = "#1f1c17";
+    ctx.font = "400 24px Arial, sans-serif";
+    let itemY = insideY + 38;
+    for (const item of lineItems) {
+      const itemTitle = item.title || "Untitled";
+      ctx.fillText(truncateCanvasText(ctx, itemTitle, insideWidth), insideX, itemY);
+      itemY += 34;
     }
+  }
 
-    if (items.length > indexItems.length) {
-      ctx.font = "400 26px Arial, sans-serif";
-      ctx.fillStyle = "rgba(255, 250, 241, 0.76)";
-      ctx.fillText(`+ ${items.length - indexItems.length} more articles`, margin, itemY + 6);
-    }
+  ctx.strokeStyle = "rgba(215, 25, 32, 0.95)";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(margin, 1300);
+  ctx.lineTo(500, 1300);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(31, 28, 23, 0.82)";
+  ctx.font = "700 28px Arial, sans-serif";
+  ctx.fillText(`${items.length} ARTICLES`, margin, 1312);
+  if (metadata.title) {
+    ctx.font = "400 24px Arial, sans-serif";
+    ctx.fillText(truncateCanvasText(ctx, metadata.title, 410), margin, 1352);
   }
 
   ctx.restore();
@@ -1034,7 +1121,7 @@ function canvasToBlob(canvas, mediaType, quality) {
   });
 }
 
-async function composeGeneratedCoverAsset(asset, items, metadata) {
+async function composeGeneratedCoverAsset(asset, items, metadata, featuredItem) {
   const image = await loadImageFromAsset(asset);
   const canvas = document.createElement("canvas");
   canvas.width = COVER_WIDTH;
@@ -1044,8 +1131,9 @@ async function composeGeneratedCoverAsset(asset, items, metadata) {
     throw new Error("Generated cover image could not be composed.");
   }
 
-  drawCoverImage(ctx, image, COVER_WIDTH, COVER_HEIGHT);
-  drawGeneratedCoverTypography(ctx, items, metadata);
+  drawMagazineCoverBase(ctx);
+  drawCoverImageFrame(ctx, image);
+  drawGeneratedCoverTypography(ctx, items, metadata, featuredItem);
 
   const blob = await canvasToBlob(canvas, "image/jpeg", 0.92);
   return {
@@ -1071,8 +1159,9 @@ async function readOpenAiError(response) {
 
 async function generateCoverAsset(apiKey, items, metadata, options = {}) {
   const promptData = buildCoverPrompt(items, metadata);
+  const featuredTitle = promptData.featuredItem?.title || "Untitled";
   logLine(
-    `Generating cover with ${OPENAI_COVER_MODEL}: ${promptData.sampledCount}/${items.length} sampled articles, ${promptData.contextLength} context chars.`
+    `Generating cover with ${OPENAI_COVER_MODEL}: featured article "${featuredTitle}", ${promptData.contextLength} context chars.`
   );
 
   const response = await fetchWithRetry(
@@ -1116,7 +1205,7 @@ async function generateCoverAsset(apiKey, items, metadata, options = {}) {
     bytes: base64ToBytes(image.b64_json),
   };
   assertNotCanceled(options.signal);
-  return composeGeneratedCoverAsset(baseCover, items, metadata);
+  return composeGeneratedCoverAsset(baseCover, items, metadata, promptData.featuredItem);
 }
 
 async function getCoverAsset(file) {
@@ -1305,7 +1394,7 @@ async function buildChapterXhtml(item, imageRegistry, options = {}) {
   const title = item.title || "Untitled";
   const author = item.author || "";
   const site = item.site_name || "";
-  const created = item.created_at ? item.created_at.slice(0, 10) : "";
+  const created = item.created_at ? formatDisplayDate(item.created_at) : "";
   const source = item.source_url || item.url || "";
 
   let content = "";
@@ -1779,7 +1868,8 @@ elements.form.addEventListener("submit", async (event) => {
     }
 
     assertNotCanceled(controller.signal);
-    const title = metadataTitle || `${DEFAULT_TITLE} ${todayUtc()}`;
+    const issueDate = todayDisplayDate();
+    const title = metadataTitle || `${DEFAULT_TITLE} ${issueDate}`;
     const author = metadataAuthor || DEFAULT_AUTHOR;
     const uid = makeUuid();
     const coverFile = elements.epubCover.files[0] || null;
@@ -1792,7 +1882,7 @@ elements.form.addEventListener("submit", async (event) => {
       coverAsset = await generateCoverAsset(
         openaiKey,
         filtered,
-        { title, author },
+        { title, author, date: issueDate },
         {
           quality: coverQuality,
           signal: controller.signal,

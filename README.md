@@ -7,7 +7,7 @@ Client-only web app that turns your Readwise Reader articles into a single EPUB,
 - Build a single EPUB in the browser
 - Optional tag application and archive updates
 - Best-effort image embedding for Kindle/iOS
-- Optional generated book cover using OpenAI `gpt-image-2`, with title and a short article index
+- Optional generated magazine-style cover using OpenAI `gpt-image-2`, with title, date, and article lines
 
 ## Usage
 1. Open `index.html` in your browser.
@@ -21,7 +21,7 @@ Client-only web app that turns your Readwise Reader articles into a single EPUB,
 - The Readwise token and OpenAI API key are stored locally only when their remember checkboxes are enabled.
 - If an image host blocks CORS, that image may not embed.
 - Generated covers use `gpt-image-2` through the OpenAI Images API.
-- Cover prompts are built from EPUB metadata, article titles, and short sampled excerpts only. Full article text is not sent to OpenAI.
+- Cover image prompts use one selected article with a short excerpt. Full article text is not sent to OpenAI.
 
 ## License
 MIT
