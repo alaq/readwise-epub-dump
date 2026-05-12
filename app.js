@@ -27,6 +27,7 @@ const elements = {
   aiCoverFields: document.querySelector("#aiCoverFields"),
   openaiKey: document.querySelector("#openaiKey"),
   showOpenaiKey: document.querySelector("#showOpenaiKey"),
+  rememberOpenaiKey: document.querySelector("#rememberOpenaiKey"),
   coverQuality: document.querySelector("#coverQuality"),
   progressFetched: document.querySelector("#progressFetched"),
   progressSelected: document.querySelector("#progressSelected"),
@@ -40,12 +41,16 @@ const OPENAI_IMAGES_API = "https://api.openai.com/v1/images/generations";
 const OPENAI_COVER_MODEL = "gpt-image-2";
 const RATE_LIMIT_MS = 3000;
 const TOKEN_STORAGE_KEY = "readwise-epub-dump.token";
+const OPENAI_KEY_STORAGE_KEY = "readwise-epub-dump.openai-key";
 const SETTINGS_STORAGE_KEY = "readwise-epub-dump.settings";
 const DEFAULT_TITLE = "Readwise Export";
 const DEFAULT_AUTHOR = "Readwise";
 const COVER_CONTEXT_MAX_CHARS = 6000;
 const COVER_SAMPLE_ITEM_LIMIT = 12;
 const COVER_EXCERPT_MAX_CHARS = 320;
+const COVER_WIDTH = 1024;
+const COVER_HEIGHT = 1536;
+const COVER_INDEX_ITEM_LIMIT = 6;
 
 const progressState = {
   fetched: 0,
@@ -56,6 +61,7 @@ const progressState = {
 };
 
 let runState = null;
+let currentDownloadUrl = null;
 
 function setStatus(message) {
   elements.status.textContent = message;
@@ -180,6 +186,29 @@ function resetProgress() {
   setProgress({ fetched: 0, selected: 0, built: 0, updated: 0, failed: 0 });
 }
 
+function resetDownloadLink() {
+  if (currentDownloadUrl) {
+    URL.revokeObjectURL(currentDownloadUrl);
+    currentDownloadUrl = null;
+  }
+  elements.download.removeAttribute("href");
+  elements.download.removeAttribute("download");
+  elements.download.setAttribute("aria-disabled", "true");
+  elements.download.classList.add("disabled");
+  elements.download.tabIndex = -1;
+  elements.download.hidden = true;
+}
+
+function enableDownloadLink(url, filename) {
+  currentDownloadUrl = url;
+  elements.download.href = url;
+  elements.download.download = filename;
+  elements.download.setAttribute("aria-disabled", "false");
+  elements.download.classList.remove("disabled");
+  elements.download.tabIndex = 0;
+  elements.download.hidden = false;
+}
+
 function loadStoredToken() {
   if (!elements.rememberToken.checked) {
     return;
@@ -209,6 +238,35 @@ function storeToken(value) {
   }
 }
 
+function loadStoredOpenaiKey() {
+  if (!elements.rememberOpenaiKey.checked) {
+    return;
+  }
+  try {
+    const stored = localStorage.getItem(OPENAI_KEY_STORAGE_KEY);
+    if (stored) {
+      elements.openaiKey.value = stored;
+    }
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
+}
+
+function storeOpenaiKey(value) {
+  if (!elements.rememberOpenaiKey.checked) {
+    return;
+  }
+  try {
+    if (!value) {
+      localStorage.removeItem(OPENAI_KEY_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(OPENAI_KEY_STORAGE_KEY, value);
+  } catch (error) {
+    // Ignore storage errors (private mode, blocked storage, etc.).
+  }
+}
+
 function getSettingsFromForm() {
   return {
     location: elements.location.value,
@@ -229,6 +287,7 @@ function getSettingsFromForm() {
     cover: {
       generate: elements.generateCover.checked,
       quality: elements.coverQuality.value,
+      rememberOpenaiKey: elements.rememberOpenaiKey.checked,
     },
   };
 }
@@ -290,6 +349,9 @@ function applySettings(settings) {
     if (typeof settings.cover.quality === "string") {
       elements.coverQuality.value = settings.cover.quality;
     }
+    if (typeof settings.cover.rememberOpenaiKey === "boolean") {
+      elements.rememberOpenaiKey.checked = settings.cover.rememberOpenaiKey;
+    }
   }
 }
 
@@ -322,6 +384,7 @@ function updateCoverControls() {
   elements.aiCoverFields.hidden = !enabled;
   elements.openaiKey.disabled = !enabled;
   elements.showOpenaiKey.disabled = !enabled;
+  elements.rememberOpenaiKey.disabled = !enabled;
   elements.coverQuality.disabled = !enabled;
 }
 
@@ -762,14 +825,15 @@ function buildCoverContext(items, metadata) {
 
 function buildCoverPrompt(items, metadata) {
   const context = buildCoverContext(items, metadata);
-  const prompt = `Create a portrait EPUB cover image inspired by this Readwise reading collection.
+  const prompt = `Create a portrait EPUB cover background inspired by this Readwise reading collection.
 
 Design goals:
-- Refined editorial book cover, suitable for an e-reader library thumbnail.
+- Refined editorial book cover artwork, suitable for an e-reader library thumbnail.
 - Abstract or metaphorical composition inspired by the themes in the sampled context.
 - Warm, serious, literary visual tone with strong contrast and a clear focal point.
+- Leave clean negative space near the top and lower third for overlaid title and index text.
 - No screenshots, browser UI, article cards, watermarks, logos, author portraits, or collages of tiny text.
-- Do not render readable words, letters, title text, or fake typography inside the image.
+- Do not render readable words, letters, title text, or fake typography inside the image; text will be added later.
 
 Use only this bounded, sampled context:
 ${context}`;
@@ -778,6 +842,217 @@ ${context}`;
     prompt,
     contextLength: context.length,
     sampledCount: selectRepresentativeItems(items, COVER_SAMPLE_ITEM_LIMIT).length,
+  };
+}
+
+function loadImageFromAsset(asset) {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([asset.bytes], { type: asset.mediaType });
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Generated cover image could not be loaded."));
+    };
+    image.src = url;
+  });
+}
+
+function drawCoverImage(ctx, image, width, height) {
+  const imageWidth = image.naturalWidth || image.width;
+  const imageHeight = image.naturalHeight || image.height;
+  const scale = Math.max(width / imageWidth, height / imageHeight);
+  const drawWidth = imageWidth * scale;
+  const drawHeight = imageHeight * scale;
+  const x = (width - drawWidth) / 2;
+  const y = (height - drawHeight) / 2;
+  ctx.drawImage(image, x, y, drawWidth, drawHeight);
+}
+
+function truncateCanvasText(ctx, value, maxWidth) {
+  const text = normalizeWhitespace(value);
+  if (ctx.measureText(text).width <= maxWidth) {
+    return text;
+  }
+  const suffix = "...";
+  let candidate = text;
+  while (candidate.length > 0 && ctx.measureText(`${candidate}${suffix}`).width > maxWidth) {
+    candidate = candidate.slice(0, -1).trimEnd();
+  }
+  return candidate ? `${candidate}${suffix}` : suffix;
+}
+
+function wrapCanvasText(ctx, value, maxWidth, maxLines) {
+  const words = normalizeWhitespace(value).split(" ").filter(Boolean);
+  const lines = [];
+  let line = "";
+
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    const candidate = line ? `${line} ${word}` : word;
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      line = candidate;
+      continue;
+    }
+
+    if (!line) {
+      lines.push(truncateCanvasText(ctx, word, maxWidth));
+    } else {
+      lines.push(line);
+      line = word;
+    }
+
+    if (lines.length === maxLines) {
+      const remaining = [line, ...words.slice(index + 1)].filter(Boolean).join(" ");
+      lines[lines.length - 1] = truncateCanvasText(
+        ctx,
+        `${lines[lines.length - 1]} ${remaining}`,
+        maxWidth
+      );
+      return lines;
+    }
+  }
+
+  if (line && lines.length < maxLines) {
+    lines.push(line);
+  }
+
+  return lines;
+}
+
+function drawWrappedCanvasText(ctx, lines, x, y, lineHeight) {
+  for (const [index, line] of lines.entries()) {
+    ctx.fillText(line, x, y + index * lineHeight);
+  }
+}
+
+function drawGeneratedCoverTypography(ctx, items, metadata) {
+  const width = COVER_WIDTH;
+  const height = COVER_HEIGHT;
+  const margin = 84;
+  const textWidth = width - margin * 2;
+
+  const topGradient = ctx.createLinearGradient(0, 0, 0, height * 0.58);
+  topGradient.addColorStop(0, "rgba(21, 17, 13, 0.86)");
+  topGradient.addColorStop(0.7, "rgba(21, 17, 13, 0.42)");
+  topGradient.addColorStop(1, "rgba(21, 17, 13, 0)");
+  ctx.fillStyle = topGradient;
+  ctx.fillRect(0, 0, width, height * 0.58);
+
+  const bottomGradient = ctx.createLinearGradient(0, height * 0.52, 0, height);
+  bottomGradient.addColorStop(0, "rgba(21, 17, 13, 0)");
+  bottomGradient.addColorStop(0.35, "rgba(21, 17, 13, 0.52)");
+  bottomGradient.addColorStop(1, "rgba(21, 17, 13, 0.9)");
+  ctx.fillStyle = bottomGradient;
+  ctx.fillRect(0, height * 0.52, width, height * 0.48);
+
+  ctx.strokeStyle = "rgba(255, 250, 241, 0.58)";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(36, 36, width - 72, height - 72);
+
+  ctx.save();
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "#fffaf1";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+  ctx.shadowBlur = 10;
+  ctx.shadowOffsetY = 4;
+
+  const title = metadata.title || DEFAULT_TITLE;
+  let titleSize = 90;
+  let titleLines = [];
+  let titleLineHeight = 100;
+  do {
+    ctx.font = `700 ${titleSize}px Georgia, "Times New Roman", serif`;
+    titleLineHeight = Math.round(titleSize * 1.08);
+    titleLines = wrapCanvasText(ctx, title, textWidth, 4);
+    titleSize -= 6;
+  } while (titleLines.length * titleLineHeight > 410 && titleSize >= 56);
+
+  let y = 110;
+  drawWrappedCanvasText(ctx, titleLines, margin, y, titleLineHeight);
+  y += titleLines.length * titleLineHeight + 28;
+
+  if (metadata.author) {
+    ctx.font = '400 34px Georgia, "Times New Roman", serif';
+    ctx.fillStyle = "rgba(255, 250, 241, 0.88)";
+    ctx.fillText(truncateCanvasText(ctx, metadata.author, textWidth), margin, y);
+  }
+
+  const indexItems = items.slice(0, COVER_INDEX_ITEM_LIMIT);
+  if (indexItems.length > 0) {
+    const indexTop = height - 430;
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "rgba(255, 250, 241, 0.92)";
+    ctx.font = "700 30px Arial, sans-serif";
+    ctx.fillText("INDEX", margin, indexTop);
+
+    ctx.strokeStyle = "rgba(255, 250, 241, 0.55)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(margin, indexTop + 44);
+    ctx.lineTo(width - margin, indexTop + 44);
+    ctx.stroke();
+
+    ctx.font = '400 29px Georgia, "Times New Roman", serif';
+    ctx.fillStyle = "rgba(255, 250, 241, 0.9)";
+    let itemY = indexTop + 70;
+    for (const [index, item] of indexItems.entries()) {
+      const itemTitle = item.title || `Untitled ${index + 1}`;
+      const line = `${index + 1}. ${truncateCanvasText(ctx, itemTitle, textWidth - 46)}`;
+      ctx.fillText(line, margin, itemY);
+      itemY += 45;
+    }
+
+    if (items.length > indexItems.length) {
+      ctx.font = "400 26px Arial, sans-serif";
+      ctx.fillStyle = "rgba(255, 250, 241, 0.76)";
+      ctx.fillText(`+ ${items.length - indexItems.length} more articles`, margin, itemY + 6);
+    }
+  }
+
+  ctx.restore();
+}
+
+function canvasToBlob(canvas, mediaType, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error("Generated cover image could not be composed."));
+        }
+      },
+      mediaType,
+      quality
+    );
+  });
+}
+
+async function composeGeneratedCoverAsset(asset, items, metadata) {
+  const image = await loadImageFromAsset(asset);
+  const canvas = document.createElement("canvas");
+  canvas.width = COVER_WIDTH;
+  canvas.height = COVER_HEIGHT;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("Generated cover image could not be composed.");
+  }
+
+  drawCoverImage(ctx, image, COVER_WIDTH, COVER_HEIGHT);
+  drawGeneratedCoverTypography(ctx, items, metadata);
+
+  const blob = await canvasToBlob(canvas, "image/jpeg", 0.92);
+  return {
+    filename: "cover.jpg",
+    href: "images/cover.jpg",
+    mediaType: "image/jpeg",
+    bytes: new Uint8Array(await blob.arrayBuffer()),
   };
 }
 
@@ -834,12 +1109,14 @@ async function generateCoverAsset(apiKey, items, metadata, options = {}) {
     throw new Error("Cover generation succeeded but no image data was returned.");
   }
 
-  return {
+  const baseCover = {
     filename: "cover.jpg",
     href: "images/cover.jpg",
     mediaType: "image/jpeg",
     bytes: base64ToBytes(image.b64_json),
   };
+  assertNotCanceled(options.signal);
+  return composeGeneratedCoverAsset(baseCover, items, metadata);
 }
 
 async function getCoverAsset(file) {
@@ -1314,6 +1591,18 @@ elements.coverQuality.addEventListener("change", saveSettings);
 elements.showOpenaiKey.addEventListener("change", () => {
   elements.openaiKey.type = elements.showOpenaiKey.checked ? "text" : "password";
 });
+elements.rememberOpenaiKey.addEventListener("change", () => {
+  if (!elements.rememberOpenaiKey.checked) {
+    try {
+      localStorage.removeItem(OPENAI_KEY_STORAGE_KEY);
+    } catch (error) {
+      // Ignore storage errors (private mode, blocked storage, etc.).
+    }
+  } else {
+    storeOpenaiKey(elements.openaiKey.value.trim());
+  }
+  saveSettings();
+});
 elements.rememberToken.addEventListener("change", () => {
   if (!elements.rememberToken.checked) {
     try {
@@ -1332,6 +1621,15 @@ elements.showToken.addEventListener("change", () => {
 elements.token.addEventListener("input", () => {
   updateTokenHint();
   storeToken(normalizeToken(elements.token.value));
+});
+elements.openaiKey.addEventListener("input", () => {
+  storeOpenaiKey(elements.openaiKey.value.trim());
+});
+elements.download.addEventListener("click", (event) => {
+  if (elements.download.getAttribute("aria-disabled") === "true" || !currentDownloadUrl) {
+    event.preventDefault();
+    setStatus("EPUB is not ready yet.");
+  }
 });
 
 elements.downloadLog.addEventListener("click", () => {
@@ -1363,8 +1661,10 @@ loadSettings();
 updateTagPreview();
 updateCoverControls();
 loadStoredToken();
+loadStoredOpenaiKey();
 updateTokenHint();
 renderProgress();
+resetDownloadLink();
 
 elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1373,13 +1673,13 @@ elements.form.addEventListener("submit", async (event) => {
   }
   clearLog();
   resetProgress();
+  resetDownloadLink();
   setStatus("Starting...");
-  elements.download.hidden = true;
   elements.run.disabled = true;
   elements.cancel.disabled = false;
 
   const controller = new AbortController();
-  runState = { controller, downloadUrl: null };
+  runState = { controller };
 
   const token = normalizeToken(elements.token.value);
   elements.token.value = token;
@@ -1401,6 +1701,9 @@ elements.form.addEventListener("submit", async (event) => {
 
   if (elements.rememberToken.checked) {
     storeToken(token);
+  }
+  if (elements.rememberOpenaiKey.checked) {
+    storeOpenaiKey(openaiKey);
   }
   saveSettings();
 
@@ -1510,14 +1813,8 @@ elements.form.addEventListener("submit", async (event) => {
       onProgress: ({ built }) => setProgress({ built }),
     });
 
-    if (runState?.downloadUrl) {
-      URL.revokeObjectURL(runState.downloadUrl);
-    }
     const epubUrl = URL.createObjectURL(epubBlob);
-    runState.downloadUrl = epubUrl;
-    elements.download.href = epubUrl;
-    elements.download.download = `readwise-${todayUtc()}.epub`;
-    elements.download.hidden = false;
+    enableDownloadLink(epubUrl, `readwise-${todayUtc()}.epub`);
 
     setStatus("EPUB ready.");
     logLine("EPUB generated. You can download it now.");

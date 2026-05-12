@@ -179,6 +179,14 @@ button:disabled {
   transform: none;
 }
 
+.button.disabled,
+.button[aria-disabled="true"] {
+  background: #c5b4a5;
+  cursor: not-allowed;
+  pointer-events: none;
+  transform: none;
+}
+
 .button.secondary {
   background: #f0e5d6;
   color: var(--ink);

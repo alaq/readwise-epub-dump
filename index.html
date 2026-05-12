@@ -124,6 +124,10 @@
                   <input id="showOpenaiKey" type="checkbox" />
                   Show OpenAI key
                 </label>
+                <label class="inline">
+                  <input id="rememberOpenaiKey" type="checkbox" />
+                  Remember OpenAI key on this device
+                </label>
               </div>
               <label>
                 Cover quality
@@ -137,6 +141,7 @@
               <p class="helper">
                 Uses EPUB metadata, article titles, and short sampled excerpts only.
                 Full article text is not sent to OpenAI.
+                Stored locally only when enabled above.
               </p>
             </div>
             <p class="helper">
@@ -179,7 +184,9 @@
           </div>
         </div>
         <div class="actions">
-          <a id="download" class="button" href="#" download hidden>Download EPUB</a>
+          <a id="download" class="button disabled" aria-disabled="true" tabindex="-1" hidden>
+            Download EPUB
+          </a>
         </div>
       </section>
 
